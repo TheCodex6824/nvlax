@@ -9,6 +9,8 @@
     OR IMPLIED WARRANTY. IN NO EVENT WILL THE AUTHORS BE HELD
     LIABLE FOR ANY DAMAGES ARISING FROM THE USE OF THIS SOFTWARE.  */
 
+#include <array>
+#include <cstdint>
 #include <iostream>
 
 #include <LIEF/ELF.hpp>
@@ -21,6 +23,20 @@ using namespace LIEF::ELF;
 
 const char *app_name = "nvlax_fbc";
 const char *lib_name = "libnvidia-fbc.so.XXX";
+
+struct JumpPatchInfo
+{
+    ZydisMnemonic jump_op;
+    size_t jump_offset;
+    size_t jump_size;
+    std::string_view desc;
+};
+
+const std::array<JumpPatchInfo, 2> possible_patches =
+{{
+    {ZYDIS_MNEMONIC_JNZ, 0xA1, 6, "[555,)"},
+    {ZYDIS_MNEMONIC_JNB, 0x0A, 2, "[535, 555)"}
+}};
 
 int
 main (int argc,
@@ -77,36 +93,58 @@ main (int argc,
 
     PPK_ASSERT_ERROR(found);
 
+    bool success = false;
+    for (const auto& patch : possible_patches)
     {
-        auto v_backtrack_bytes = bin->get_content_from_virtual_address(offset - 0xA, 2);
+        auto v_backtrack_bytes = bin->get_content_from_virtual_address(offset - patch.jump_offset,
+                                                                           patch.jump_size);
 
         ZydisDecodedInstruction instr;
         ZydisDecodedOperand operands[ZYDIS_MAX_OPERAND_COUNT];
-        PPK_ASSERT_ERROR(ZYAN_SUCCESS(ZydisDecoderDecodeFull(&decoder,
-                                                               v_backtrack_bytes.data(),
-                                                               v_backtrack_bytes.size(),
-                                                               &instr,
-                                                               operands)));
+        if (!ZYAN_SUCCESS(ZydisDecoderDecodeFull(&decoder,
+                                                 v_backtrack_bytes.data(),
+                                                 v_backtrack_bytes.size(),
+                                                 &instr,
+                                                 operands)))
+        {
+            continue;
+        }
 
 
 
-        PPK_ASSERT_ERROR(instr.mnemonic == ZYDIS_MNEMONIC_JNB);
+        if (instr.mnemonic != patch.jump_op)
+        {
+            continue;
+        }
 
         ZyanU64 addr;
-        PPK_ASSERT_ERROR(ZYAN_SUCCESS(ZydisCalcAbsoluteAddress(&instr,
-                                                               &operands[0],
-                                                               offset - 0xA,
-                                                               &addr)));
+        if (!ZYAN_SUCCESS(ZydisCalcAbsoluteAddress(&instr,
+                                                   &operands[0],
+                                                   offset - patch.jump_offset,
+                                                   &addr)))
+        {
+            continue;
+        }
 
         // hopefully more fail-safe
+        // leaving this as an assert because this should always pass if it gets here
         PPK_ASSERT_ERROR(addr == offset);
+
+        // NOP the jump
+        bin->patch_address(offset - patch.jump_offset,
+                           std::vector<std::uint8_t>(patch.jump_size, 0x90));
+        bin->write(output.data());
+        std::cout << "[+] patched successfully with patch \"" << patch.desc << "\"" << std::endl;
+        success = true;
+        break;
     }
 
-    // NOP the jump
-    bin->patch_address(offset - 0xA, { 0x90, 0x90 });
-    bin->write(output.data());
+    int retval = EXIT_SUCCESS;
+    if (!success)
+    {
+        std::cerr << "[+] all possible patches failed" << std::endl;
+        retval = EXIT_FAILURE;
+    }
 
-    std::cout << "[+] patched successfully\n";
-
-    return EXIT_SUCCESS;
+    return retval;
 }
