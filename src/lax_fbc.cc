@@ -32,9 +32,10 @@ struct JumpPatchInfo
     std::string_view desc;
 };
 
-const std::array<JumpPatchInfo, 2> possible_patches =
+const std::array<JumpPatchInfo, 3> possible_patches =
 {{
-    {ZYDIS_MNEMONIC_JNZ, 0xA1, 6, "[555,)"},
+    {ZYDIS_MNEMONIC_JNZ, 0x102, 6, "[560, )"},
+    {ZYDIS_MNEMONIC_JNZ, 0xA1, 6, "[555, 560)"},
     {ZYDIS_MNEMONIC_JNB, 0x0A, 2, "[535, 555)"}
 }};
 
