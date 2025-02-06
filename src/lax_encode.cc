@@ -9,6 +9,7 @@
     OR IMPLIED WARRANTY. IN NO EVENT WILL THE AUTHORS BE HELD
     LIABLE FOR ANY DAMAGES ARISING FROM THE USE OF THIS SOFTWARE.  */
 
+#include <array>
 #include <iostream>
 
 #include <LIEF/ELF.hpp>
@@ -39,7 +40,7 @@ patch_linux (LIEF::ELF::Binary *bin)
     ZyanU64 offset;
 
     {
-        auto f_nvenc_ci = bin->get_symbol("NvEncodeAPICreateInstance");
+        const auto* f_nvenc_ci = bin->get_symbol("NvEncodeAPICreateInstance");
 
         // 0x260 here is an approximation (we should never have to go past that address)
         auto v_func_bytes = bin->get_content_from_virtual_address(f_nvenc_ci->value(), 0x260);
@@ -48,8 +49,8 @@ patch_linux (LIEF::ELF::Binary *bin)
         ZyanUSize length = v_func_bytes.size();
 
         ZydisDecodedInstruction instr;
-        ZydisDecodedOperand operands[ZYDIS_MAX_OPERAND_COUNT];
-        while (ZYAN_SUCCESS(ZydisDecoderDecodeFull(&decoder, data, length, &instr, operands))) {
+        std::array<ZydisDecodedOperand, ZYDIS_MAX_OPERAND_COUNT> operands;
+        while (ZYAN_SUCCESS(ZydisDecoderDecodeFull(&decoder, data, length, &instr, operands.data()))) {
             if (instr.mnemonic == ZYDIS_MNEMONIC_LEA) {
                 offset = f_nvenc_ci->value() +
                          (data - v_func_bytes.data() + instr.length) +
@@ -80,8 +81,8 @@ patch_linux (LIEF::ELF::Binary *bin)
         // look for the second instance of 'test eax, eax'
         uint8_t n = 0;
         ZydisDecodedInstruction instr;
-        ZydisDecodedOperand operands[ZYDIS_MAX_OPERAND_COUNT];
-        while (ZYAN_SUCCESS(ZydisDecoderDecodeFull(&decoder, data, length, &instr, operands))) {
+        std::array<ZydisDecodedOperand, ZYDIS_MAX_OPERAND_COUNT> operands;
+        while (ZYAN_SUCCESS(ZydisDecoderDecodeFull(&decoder, data, length, &instr, operands.data()))) {
             if (instr.mnemonic == ZYDIS_MNEMONIC_TEST &&
                 operands[0].reg.value == ZYDIS_REGISTER_EAX &&
                 operands[1].reg.value == ZYDIS_REGISTER_EAX &&
@@ -114,12 +115,12 @@ patch_windows (LIEF::PE::Binary *bin)
 
     std::cout << std::hex;
 
-    if (bin->header().machine() == MACHINE_TYPES::IMAGE_FILE_MACHINE_AMD64) {
-        PPK_ASSERT_ERROR(bin->get_export().name() == "nvEncodeAPI64.dll");
+    if (bin->header().machine() == Header::MACHINE_TYPES::AMD64) {
+        PPK_ASSERT_ERROR(bin->get_export()->name() == "nvEncodeAPI64.dll");
         arch = x64;
     }
-    else if (bin->header().machine() == MACHINE_TYPES::IMAGE_FILE_MACHINE_I386) {
-        PPK_ASSERT_ERROR(bin->get_export().name() == "nvEncodeAPI.dll");
+    else if (bin->header().machine() == Header::MACHINE_TYPES::I386) {
+        PPK_ASSERT_ERROR(bin->get_export()->name() == "nvEncodeAPI.dll");
         arch = x86;
     }
     else {
@@ -127,7 +128,7 @@ patch_windows (LIEF::PE::Binary *bin)
         return;
     }
 
-    std::cout << "[+] " << bin->get_export().name() << "\n";
+    std::cout << "[+] " << bin->get_export()->name() << "\n";
 
     ZydisFormatter fmt;
     ZydisFormatterInit(&fmt, ZYDIS_FORMATTER_STYLE_INTEL);
@@ -144,12 +145,12 @@ patch_windows (LIEF::PE::Binary *bin)
         auto v_thunk_bytes = bin->get_content_from_virtual_address(address, 0x5);
 
         ZydisDecodedInstruction instr;
-        ZydisDecodedOperand operands[ZYDIS_MAX_OPERAND_COUNT];
+        std::array<ZydisDecodedOperand, ZYDIS_MAX_OPERAND_COUNT> operands;
         PPK_ASSERT_ERROR(ZYAN_SUCCESS(ZydisDecoderDecodeFull(&decoder,
                                                                v_thunk_bytes.data(),
                                                                v_thunk_bytes.size(),
                                                                &instr,
-                                                               operands)));
+                                                               operands.data())));
 
         PPK_ASSERT_ERROR(instr.mnemonic == ZYDIS_MNEMONIC_JMP);
 
@@ -165,7 +166,7 @@ patch_windows (LIEF::PE::Binary *bin)
     ZyanU64 offset;
 
     {
-        auto export_entries = bin->get_export().entries();
+        auto export_entries = bin->get_export()->entries();
 
         auto f_nvenc_ci = std::find_if(export_entries.begin(),
                                        export_entries.end(),
@@ -181,11 +182,11 @@ patch_windows (LIEF::PE::Binary *bin)
         ZyanUSize length = v_func_bytes.size();
 
         ZydisDecodedInstruction instr;
-        ZydisDecodedOperand operands[ZYDIS_MAX_OPERAND_COUNT];
+        std::array<ZydisDecodedOperand, ZYDIS_MAX_OPERAND_COUNT> operands;
 
         if (arch == x64) {
             ZyanU64 temp = 0;
-            while (ZYAN_SUCCESS(ZydisDecoderDecodeFull(&decoder, data, length, &instr, operands))) {
+            while (ZYAN_SUCCESS(ZydisDecoderDecodeFull(&decoder, data, length, &instr, operands.data()))) {
                 if (instr.mnemonic == ZYDIS_MNEMONIC_LEA &&
                     operands[1].type == ZYDIS_OPERAND_TYPE_MEMORY)
                 {
@@ -206,8 +207,9 @@ patch_windows (LIEF::PE::Binary *bin)
                 data += instr.length;
                 length -= instr.length;
             }
-        } else {
-            while (ZYAN_SUCCESS(ZydisDecoderDecodeFull(&decoder, data, length, &instr, operands))) {
+        }
+        else {
+            while (ZYAN_SUCCESS(ZydisDecoderDecodeFull(&decoder, data, length, &instr, operands.data()))) {
                 // this should work forever if we assume that NV_ENCODE_API_FUNCTION_LIST will never change!
                 if (instr.mnemonic == ZYDIS_MNEMONIC_MOV &&
                     operands[0].mem.base == ZYDIS_REGISTER_ESI &&
@@ -235,8 +237,8 @@ patch_windows (LIEF::PE::Binary *bin)
 
         uint8_t n = 0;
         ZydisDecodedInstruction instr;
-        ZydisDecodedOperand operands[ZYDIS_MAX_OPERAND_COUNT];
-        while (ZYAN_SUCCESS(ZydisDecoderDecodeFull(&decoder, data, length, &instr, operands))) {
+        std::array<ZydisDecodedOperand, ZYDIS_MAX_OPERAND_COUNT> operands;
+        while (ZYAN_SUCCESS(ZydisDecoderDecodeFull(&decoder, data, length, &instr, operands.data()))) {
             if (instr.mnemonic == ZYDIS_MNEMONIC_TEST &&
                 operands[0].reg.value == ZYDIS_REGISTER_EAX &&
                 operands[1].reg.value == ZYDIS_REGISTER_EAX &&
@@ -268,10 +270,10 @@ main (int argc,
 
     auto bin = LIEF::Parser::parse(input.data());
 
-    if (bin->format() == LIEF::FORMAT_ELF) {
+    if (bin->format() == LIEF::Binary::ELF) {
         patch_linux((LIEF::ELF::Binary *)bin.get());
     }
-    else if (bin->format() == LIEF::FORMAT_PE) {
+    else if (bin->format() == LIEF::Binary::PE) {
         patch_windows((LIEF::PE::Binary *)bin.get());
     }
     else {

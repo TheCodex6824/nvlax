@@ -12,6 +12,7 @@
 #include <array>
 #include <cstdint>
 #include <iostream>
+#include <unordered_set>
 
 #include <LIEF/ELF.hpp>
 #include <Zydis/Zydis.h>
@@ -19,26 +20,101 @@
 
 #include "common.h"
 
-using namespace LIEF::ELF;
-
 const char *app_name = "nvlax_fbc";
 const char *lib_name = "libnvidia-fbc.so.XXX";
 
-struct JumpPatchInfo
+static bool find_string_xref(ZydisDecoder& decoder, const char* str, const LIEF::Section* rodata, const LIEF::Section* text, ZyanU64& out_addr)
 {
-    ZydisMnemonic jump_op;
-    size_t jump_offset;
-    size_t jump_size;
-    std::string_view desc;
-};
+    ZyanU64 offset = rodata->virtual_address() + rodata->search(str);
 
-const std::array<JumpPatchInfo, 3> possible_patches =
-{{
-    {ZYDIS_MNEMONIC_JNZ, 0x102, 6, "[560, )"},
-    {ZYDIS_MNEMONIC_JNZ, 0xA1, 6, "[555, 560)"},
-    {ZYDIS_MNEMONIC_JNB, 0x0A, 2, "[535, 555)"}
-}};
+    auto content = text->content();
+    const uint8_t *data = content.data();
+    ZyanUSize length = content.size();
 
+    bool found = false;
+    ZydisDecodedInstruction instr;
+    std::array<ZydisDecodedOperand, ZYDIS_MAX_OPERAND_COUNT> operands;
+    while (ZYAN_SUCCESS(ZydisDecoderDecodeFull(&decoder, data, length, &instr, operands.data()))) {
+        if (instr.mnemonic == ZYDIS_MNEMONIC_LEA) {
+            ZyanU64 temp = text->virtual_address() +
+                          (data - content.data() + instr.length) +
+                          operands[1].mem.disp.value;
+
+            if (temp == offset) {
+                found = true;
+                out_addr = text->virtual_address() + data - content.data();
+                break;
+            }
+        }
+
+        data += instr.length;
+        length -= instr.length;
+    }
+
+    return found;
+}
+
+static bool find_call_dest(ZydisDecoder& decoder, ZyanU64 start, const LIEF::Section* text, ZyanU64& out_addr)
+{
+    auto content = text->content();
+    const uint8_t *data = content.data() + (start - text->virtual_address());
+    ZyanUSize length = content.size();
+
+    ZydisDecodedInstruction instr;
+    std::array<ZydisDecodedOperand, ZYDIS_MAX_OPERAND_COUNT> operands;
+    bool found = false;
+    while (ZYAN_SUCCESS(ZydisDecoderDecodeFull(&decoder, data, length, &instr, operands.data()))) {
+        if (instr.mnemonic == ZYDIS_MNEMONIC_CALL && ZYAN_SUCCESS(ZydisCalcAbsoluteAddress(&instr, &operands[0], text->virtual_address() + (data - content.data()), &out_addr))) {
+            found = true;
+            break;
+        }
+
+        data += instr.length;
+        length -= instr.length;
+    }
+
+    return found;
+}
+
+static const std::unordered_set<ZydisMnemonic> JUMP_MNEMONICS = { ZYDIS_MNEMONIC_JB, ZYDIS_MNEMONIC_JBE, ZYDIS_MNEMONIC_JCXZ, ZYDIS_MNEMONIC_JECXZ, ZYDIS_MNEMONIC_JL,
+                                                                 ZYDIS_MNEMONIC_JLE, ZYDIS_MNEMONIC_JMP, ZYDIS_MNEMONIC_JNB, ZYDIS_MNEMONIC_JNBE, ZYDIS_MNEMONIC_JNL,
+                                                                 ZYDIS_MNEMONIC_JNLE, ZYDIS_MNEMONIC_JNO, ZYDIS_MNEMONIC_JNP, ZYDIS_MNEMONIC_JNS, ZYDIS_MNEMONIC_JNZ,
+                                                                 ZYDIS_MNEMONIC_JO, ZYDIS_MNEMONIC_JP, ZYDIS_MNEMONIC_JS, ZYDIS_MNEMONIC_JZ };
+
+static bool find_jump(ZydisDecoder& decoder, ZyanU64 start, const LIEF::Section* text, ZyanU64 jump_target, ZyanU64& jump_out, ZyanUSize& jump_size)
+{
+    auto content = text->content();
+    const uint8_t *data = content.data() + (start - text->virtual_address());
+    ZyanUSize length = content.size();
+
+    ZydisDecodedInstruction instr;
+    std::array<ZydisDecodedOperand, ZYDIS_MAX_OPERAND_COUNT> operands;
+    bool found = false;
+    while (ZYAN_SUCCESS(ZydisDecoderDecodeFull(&decoder, data, length, &instr, operands.data()))) {
+        if (JUMP_MNEMONICS.find(instr.mnemonic) != JUMP_MNEMONICS.end()) {
+            ZyanU64 addr;
+            ZyanU64 offset = text->virtual_address() + (data - content.data());
+            if (ZYAN_SUCCESS(ZydisCalcAbsoluteAddress(&instr,
+                                                       &operands[0],
+                                                       offset,
+                                                       &addr)) && addr == jump_target)
+            {
+                jump_out = offset;
+                jump_size = instr.length;
+                found = true;
+                break;
+            }
+        }
+
+        data += instr.length;
+        length -= instr.length;
+    }
+
+    return found;
+}
+
+constexpr const char* EGL_LIB_STRING = "libEGL_nvidia.so.0";
+constexpr const char* UNSUPPORTED_HW_STRING = "This hardware does not support NvFBC";
 int
 main (int argc,
       char **argv)
@@ -48,104 +124,50 @@ main (int argc,
         return EXIT_FAILURE;
     }
 
-    auto bin = Parser::parse(input.data());
-
-    size_t offset;
-
-    {
-        auto s_rodata = bin->get_section(".rodata");
-        offset = s_rodata->virtual_address() + s_rodata->search("This hardware does not support NvFBC");
-    }
+    auto bin = LIEF::ELF::Parser::parse(input.data());
 
     std::cout << "[+] libnvidia-fbc.so\n";
 
     ZydisDecoder decoder;
     ZydisDecoderInit(&decoder, ZYDIS_MACHINE_MODE_LONG_64, ZYDIS_STACK_WIDTH_64);
 
-    bool found = false;
+    // basic outline of patch strategy:
+    // 1. find address of start of function to patch
+    // 2. find branch target we want to make inaccessible
+    // 3. patch jump leading to that branch
+    // we have to find the start of the function because it is impossible to go backwards in an x86 instruction stream,
+    // which is why the jump offset used to be hardcoded instead of searched for
+    const auto* s_rodata = bin->get_section(".rodata");
+    const auto* s_text = bin->get_section(".text");
 
-    {
-        auto s_text = bin->get_section(".text");
-        auto v_text_content = s_text->content();
+    // find string near call of function we want to patch
+    ZyanU64 libegl_offset = 0;
+    bool found = find_string_xref(decoder, EGL_LIB_STRING, s_rodata, s_text, libegl_offset);
+    PPK_ASSERT_ERROR(found, "Could not locate string \"%s\" in binary", EGL_LIB_STRING);
 
-        const uint8_t *data = v_text_content.data();
-        ZyanUSize length = v_text_content.size();
+    // use previous string xref to find actual address of function we want to patch
+    // assumes the next call after string xref is the call to the target function
+    ZyanU64 target_offset = 0;
+    found = find_call_dest(decoder, libegl_offset, s_text, target_offset);
+    PPK_ASSERT_ERROR(found, "Could not find call to patch target function");
 
-        // find the only x-ref to the string above
-        ZydisDecodedInstruction instr;
-        ZydisDecodedOperand operands[ZYDIS_MAX_OPERAND_COUNT];
-        while (ZYAN_SUCCESS(ZydisDecoderDecodeFull(&decoder, data, length, &instr, operands))) {
-            if (instr.mnemonic == ZYDIS_MNEMONIC_LEA) {
-                size_t temp = s_text->virtual_address() +
-                              (data - v_text_content.data() + instr.length) +
-                              operands[1].mem.disp.value;
+    // find branch target to patch out
+    ZyanU64 lea_offset = 0;
+    found = find_string_xref(decoder, UNSUPPORTED_HW_STRING, s_rodata, s_text, lea_offset);
+    PPK_ASSERT_ERROR(found, "Could not locate string \"%s\" in binary", UNSUPPORTED_HW_STRING);
 
-                if (temp == offset) {
-                    found = true;
-                    offset = s_text->virtual_address() + data - v_text_content.data();
-                    break;
-                }
-            }
+    // find jump to branch target
+    // assumes the jump goes directly to the lea instruction found previously
+    ZyanU64 jump_offset = 0;
+    ZyanUSize jump_size = 0;
+    found = find_jump(decoder, target_offset, s_text, lea_offset, jump_offset, jump_size);
+    PPK_ASSERT_ERROR(found, "Could not locate jump patch target");
 
-            data += instr.length;
-            length -= instr.length;
-        }
-    }
+    // NOP the jump
+    bin->patch_address(jump_offset,
+                       std::vector<std::uint8_t>(jump_size, 0x90));
+    bin->write(output.data());
+    std::cout << "[+] patched successfully" << std::endl;
 
-    PPK_ASSERT_ERROR(found);
-
-    bool success = false;
-    for (const auto& patch : possible_patches)
-    {
-        auto v_backtrack_bytes = bin->get_content_from_virtual_address(offset - patch.jump_offset,
-                                                                           patch.jump_size);
-
-        ZydisDecodedInstruction instr;
-        ZydisDecodedOperand operands[ZYDIS_MAX_OPERAND_COUNT];
-        if (!ZYAN_SUCCESS(ZydisDecoderDecodeFull(&decoder,
-                                                 v_backtrack_bytes.data(),
-                                                 v_backtrack_bytes.size(),
-                                                 &instr,
-                                                 operands)))
-        {
-            continue;
-        }
-
-
-
-        if (instr.mnemonic != patch.jump_op)
-        {
-            continue;
-        }
-
-        ZyanU64 addr;
-        if (!ZYAN_SUCCESS(ZydisCalcAbsoluteAddress(&instr,
-                                                   &operands[0],
-                                                   offset - patch.jump_offset,
-                                                   &addr)))
-        {
-            continue;
-        }
-
-        // hopefully more fail-safe
-        // leaving this as an assert because this should always pass if it gets here
-        PPK_ASSERT_ERROR(addr == offset);
-
-        // NOP the jump
-        bin->patch_address(offset - patch.jump_offset,
-                           std::vector<std::uint8_t>(patch.jump_size, 0x90));
-        bin->write(output.data());
-        std::cout << "[+] patched successfully with patch \"" << patch.desc << "\"" << std::endl;
-        success = true;
-        break;
-    }
-
-    int retval = EXIT_SUCCESS;
-    if (!success)
-    {
-        std::cerr << "[+] all possible patches failed" << std::endl;
-        retval = EXIT_FAILURE;
-    }
-
-    return retval;
+    return EXIT_SUCCESS;
 }
