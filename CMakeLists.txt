@@ -9,33 +9,39 @@
      OR IMPLIED WARRANTY. IN NO EVENT WILL THE AUTHORS BE HELD
      LIABLE FOR ANY DAMAGES ARISING FROM THE USE OF THIS SOFTWARE.  #]]
 
-cmake_minimum_required(VERSION 3.14)
+cmake_minimum_required(VERSION 3.28)
 
 project(nvlax CXX)
 
 include(ExternalProject)
 include(FetchContent)
 
-set(LIEF_EXAMPLES OFF)
+option(LIEF_EXAMPLES "" OFF)
 
-FetchContent_Declare(ZYDIS
-    GIT_REPOSITORY https://github.com/zyantific/zydis.git
-    GIT_TAG maintenance/v4
-)
+option(ZYDIS_BUILD_TOOLS "" OFF)
+option(ZYDIS_BUILD_EXAMPLES "" OFF)
 
 FetchContent_Declare(LIEF
     GIT_REPOSITORY https://github.com/lief-project/LIEF.git
     GIT_TAG 0.16.3
+    EXCLUDE_FROM_ALL
 )
 
 FetchContent_Declare(PPK_ASSERT
     GIT_REPOSITORY https://github.com/gpakosz/PPK_ASSERT.git
     GIT_TAG 833b8b7ea49aea540a49f07ad08bf0bae1faac32
+    EXCLUDE_FROM_ALL
 )
 
-FetchContent_MakeAvailable(ZYDIS)
+FetchContent_Declare(ZYDIS
+    GIT_REPOSITORY https://github.com/zyantific/zydis.git
+    GIT_TAG maintenance/v4
+    EXCLUDE_FROM_ALL
+)
+
 FetchContent_MakeAvailable(LIEF)
 FetchContent_MakeAvailable(PPK_ASSERT)
+FetchContent_MakeAvailable(ZYDIS)
 
 # PPK_ASSERT doesn't have builtin cmake support
 add_library(ppk_assert STATIC
